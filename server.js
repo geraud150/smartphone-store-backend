@@ -305,4 +305,5 @@ app.listen(PORT, () => {
     console.log(`   - GET  /api/products`);
     console.log(`   - POST /api/orders (protégé)`);
     console.log(`   - GET  /api/orders (protégé)`);
+    console.log(`   - DELETE /api/user/delete (protégé)`);
 });
