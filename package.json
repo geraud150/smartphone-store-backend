@@ -23,10 +23,7 @@
     "mime-types": "^2.1.35",
     "mysql2": "^3.15.1"
   },
-  "overrides": {
-  "debug": "4.3.4"
-},
-
+  
   "devDependencies": {
     "nodemon": "^3.1.10"
   }
