@@ -8,7 +8,7 @@
     "dev": "nodemon server.js"
   },
   "engines": {
-    "node": "20.10.0"
+    "node": ">=20"
   },
   "author": "",
   "license": "ISC",
