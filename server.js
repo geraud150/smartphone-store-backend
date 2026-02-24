@@ -134,59 +134,79 @@ app.get('/api/products', async (req, res) => {
 // ----------------------------------------------------
 // ENDPOINT POUR PASSER UNE COMMANDE
 // ----------------------------------------------------
+// ----------------------------------------------------
+// ENDPOINT POUR PASSER UNE COMMANDE
+// ----------------------------------------------------
 app.post('/api/orders', authenticateToken, async (req, res) => {
-    const userId = req.user.id;
-    const { items } = req.body;
+  const userId = req.user.id;
+  const { items } = req.body;
 
-    if (!items || items.length === 0) {
-        return res.status(400).json({ message: "Le panier est vide ou mal formaté." });
+  if (!items || items.length === 0) {
+    return res.status(400).json({ message: "Le panier est vide ou mal formaté." });
+  }
+
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // 1) Calcul du montant_total à partir des items
+    let total = 0;
+    for (const item of items) {
+      const qte = Number(item.quantity);
+      const prix = Number(item.price_at_order);
+      if (!Number.isFinite(qte) || !Number.isFinite(prix)) {
+        console.error("Item invalide reçu :", item);
+        await connection.rollback();
+        return res.status(400).json({ message: "Données d'articles invalides." });
+      }
+      total += qte * prix;
     }
 
-    let connection;
+    // 2) Insertion de la commande avec montant_total
+    const dateCommande = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
-    try {
-        connection = await db.getConnection(); 
-        await connection.beginTransaction();
+    const [orderResult] = await connection.execute(
+      'INSERT INTO commandes (id_utilisateur, date_commande, statut, montant_total) VALUES (?, ?, ?, ?)',
+      [userId, dateCommande, 'En attente', total]
+    );
+    const idCommande = orderResult.insertId;
 
-        const dateCommande = new Date().toISOString().slice(0, 19).replace('T', ' ');
-        const [orderResult] = await connection.execute(
-            'INSERT INTO commandes (id_utilisateur, date_commande, statut, montant_total) VALUES (?, ?, ?, ?)',
-            [userId, dateCommande, 'En attente']
-        );
-        const idCommande = orderResult.insertId;
+    // 3) Insertion des détails de commande
+    const detailQueries = items.map(item => {
+      const prixALaCommande = Number(item.price_at_order);
+      const sql = `
+        INSERT INTO details_commandes (id_commande, id_produit, quantite, prix_a_la_commande)
+        VALUES (?, ?, ?, ?)
+      `;
+      return connection.execute(sql, [idCommande, item.product_id, item.quantity, prixALaCommande]);
+    });
 
-        const detailQueries = items.map(item => {
-            const prixALaCommande = item.price_at_order; 
-            const sql = `
-                INSERT INTO details_commandes (id_commande, id_produit, quantite, prix_a_la_commande) 
-                VALUES (?, ?, ?, ?)
-            `;
-            return connection.execute(sql, [idCommande, item.product_id, item.quantity, prixALaCommande]);
-        });
+    await Promise.all(detailQueries);
 
-        await Promise.all(detailQueries);
-        
-        await connection.commit(); 
+    await connection.commit();
 
-        console.log(`✅ Commande #${idCommande} enregistrée pour l'utilisateur #${userId}`);
+    console.log(`✅ Commande #${idCommande} enregistrée pour l'utilisateur #${userId} (total = ${total})`);
 
-        res.status(201).json({ 
-            message: "Commande enregistrée avec succès dans la base de données.", 
-            orderId: idCommande
-        });
+    res.status(201).json({
+      message: "Commande enregistrée avec succès dans la base de données.",
+      orderId: idCommande,
+      montant_total: total,
+    });
 
-    } catch (error) {
-        if (connection) {
-            await connection.rollback();
-        }
-        console.error(`❌ Erreur lors de l'enregistrement de la commande (User ID: ${userId}):`, error);
-        res.status(500).json({ message: "Erreur serveur : Échec de l'enregistrement de la commande." });
-
-    } finally {
-        if (connection) {
-             connection.release();
-        }
+  } catch (error) {
+    if (connection) {
+      await connection.rollback();
     }
+    console.error(`❌ Erreur lors de l'enregistrement de la commande (User ID: ${userId}):`, error);
+    res.status(500).json({ message: "Erreur serveur : Échec de l'enregistrement de la commande." });
+
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
 });
 
 // ----------------------------------------------------
