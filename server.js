@@ -150,7 +150,7 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
         const dateCommande = new Date().toISOString().slice(0, 19).replace('T', ' ');
         const [orderResult] = await connection.execute(
-            'INSERT INTO commandes (id_utilisateur, date_commande, statut) VALUES (?, ?, ?)',
+            'INSERT INTO commandes (id_utilisateur, date_commande, statut, montant_total) VALUES (?, ?, ?, ?)',
             [userId, dateCommande, 'En attente']
         );
         const idCommande = orderResult.insertId;
