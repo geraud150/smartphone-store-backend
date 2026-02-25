@@ -139,6 +139,76 @@ app.post('/api/products', authenticateToken, upload.single('productImage'), asyn
 });
 
 // ----------------------------------------------------
+// ENDPOINT ADMIN : SUPPRIMER UN PRODUIT
+// ----------------------------------------------------
+app.delete('/api/products/:id', authenticateToken, async (req, res) => {
+    const productId = req.params.id;
+
+    try {
+        // 1. On vérifie si le produit existe et on récupère son image pour la supprimer si nécessaire
+        const [rows] = await db.execute('SELECT url_image FROM produits WHERE id_produit = ?', [productId]);
+        
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "Produit non trouvé." });
+        }
+
+        // 2. Suppression dans la base de données
+        await db.execute('DELETE FROM produits WHERE id_produit = ?', [productId]);
+
+        console.log(`🗑️ Produit #${productId} supprimé par l'admin.`);
+        res.json({ message: 'Produit supprimé avec succès !' });
+
+    } catch (error) {
+        console.error("Erreur suppression produit:", error);
+        res.status(500).json({ message: "Erreur serveur lors de la suppression." });
+    }
+});
+
+// ----------------------------------------------------
+// ENDPOINT ADMIN : MODIFIER UN PRODUIT
+// ----------------------------------------------------
+app.put('/api/products/:id', authenticateToken, upload.single('productImage'), async (req, res) => {
+    const productId = req.params.id;
+    const { nom, prix, description, ram, stockage, batterie, appareil_photo, ecran, categorie } = req.body;
+    
+    try {
+        let sql;
+        let params;
+
+        // Si une nouvelle image a été téléchargée
+        if (req.file) {
+            const imageUrl = `/uploads/${req.file.filename}`;
+            sql = `
+                UPDATE produits 
+                SET nom=?, prix=?, url_image=?, description=?, ram=?, stockage=?, batterie=?, appareil_photo=?, ecran=?, categorie=? 
+                WHERE id_produit=?
+            `;
+            params = [nom, prix, imageUrl, description, ram, stockage, batterie, appareil_photo, ecran, categorie, productId];
+        } else {
+            // Si on ne change pas l'image (on garde l'ancienne url_image)
+            sql = `
+                UPDATE produits 
+                SET nom=?, prix=?, description=?, ram=?, stockage=?, batterie=?, appareil_photo=?, ecran=?, categorie=? 
+                WHERE id_produit=?
+            `;
+            params = [nom, prix, description, ram, stockage, batterie, appareil_photo, ecran, categorie, productId];
+        }
+
+        const [result] = await db.execute(sql, params);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "Produit non trouvé ou aucune modification apportée." });
+        }
+
+        console.log(`📝 Produit #${productId} mis à jour.`);
+        res.json({ message: 'Produit mis à jour avec succès !' });
+
+    } catch (error) {
+        console.error("Erreur mise à jour produit:", error);
+        res.status(500).json({ message: "Erreur serveur lors de la modification." });
+    }
+});
+// ----------------------------------------------------
 // ROUTES COMMANDES
 // ----------------------------------------------------
 
