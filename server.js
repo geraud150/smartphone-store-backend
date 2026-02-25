@@ -3,6 +3,8 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
 const db = require('./db');
+const multer = require('multer');
+const path = require('path');
 const jwt = require('jsonwebtoken');
 
 const app = express();
@@ -46,6 +48,22 @@ const authenticateToken = (req, res, next) => {
         next();
     });
 };
+// Dossier static pour les images produits
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Configuration Multer pour upload d'images
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, path.join(__dirname, 'uploads')); // dossier uploads créer à la racine du projet
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({ storage });
+
 
 // ----------------------------------------------------
 // ENDPOINT D'INSCRIPTION
@@ -118,22 +136,49 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+
 // ----------------------------------------------------
 // ENDPOINT CATALOGUE PRODUITS
 // ----------------------------------------------------
 app.get('/api/products', async (req, res) => {
-    try {
-        const [rows] = await db.execute('SELECT * FROM produits');
-        res.json(rows);
-    } catch (error) {
-        console.error("Erreur lors de la récupération des produits:", error);
-        res.status(500).json({ message: "Erreur serveur lors du chargement des produits." });
-    }
+  try {
+    const [rows] = await db.execute('SELECT * FROM produits');
+    res.json(rows);
+  } catch (error) {
+    console.error("Erreur lors de la récupération des produits:", error);
+    res.status(500).json({ message: "Erreur serveur lors du chargement des produits." });
+  }
 });
 
 // ----------------------------------------------------
-// ENDPOINT POUR PASSER UNE COMMANDE
+// ENDPOINT ADMIN : AJOUTER UN PRODUIT
 // ----------------------------------------------------
+app.post('/api/products', upload.single('productImage'), async (req, res) => {
+  try {
+    const { nom, prix, description, ram, stockage, batterie, appareil_photo, categorie, ecran } = req.body;
+    const file = req.file;
+
+    if (!nom || !prix || !file) {
+      return res.status(400).json({ message: 'Nom, prix et image sont obligatoires.' });
+    }
+
+    // URL (ou chemin) de l’image stockée
+    const imageUrl = `/uploads/${file.filename}`;
+
+    const sql = `
+      INSERT INTO produits
+      (nom, prix, url_image, description, ram, stockage, batterie, appareil_photo, ecran, categorie)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    await db.execute(sql, [nom, prix, imageUrl, description || null, ram || null, stockage || null, batterie || null, appareil_photo || null, ecran || null, categorie || null]);
+
+    res.status(201).json({ message: 'Produit ajouté au catalogue avec succès.' });
+  } catch (error) {
+    console.error("Erreur lors de l'ajout du produit :", error);
+    res.status(500).json({ message: "Erreur serveur lors de l'ajout du produit." });
+  }
+});
+
 // ----------------------------------------------------
 // ENDPOINT POUR PASSER UNE COMMANDE
 // ----------------------------------------------------
