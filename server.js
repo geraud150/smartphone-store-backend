@@ -113,7 +113,7 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-   const [rows] = await db.execute('SELECT * FROM produits ORDER BY id_produit DESC');
+   const [rows] = await db.execute('SELECT * FROM produits WHERE actif = 1 ORDER BY id_produit DESC');
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: "Erreur lors du chargement des produits." });
