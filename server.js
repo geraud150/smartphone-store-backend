@@ -113,7 +113,7 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM produits');
+   const [rows] = await db.execute('SELECT * FROM produits ORDER BY id_produit DESC');
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: "Erreur lors du chargement des produits." });
@@ -152,6 +152,9 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: "Produit non trouvé." });
         }
 
+        // 2. Nettoyage préventif du panier (produit pas encore commandé mais mis de côté par un client)
+        await db.execute('DELETE FROM panier WHERE id_produit = ?', [productId]);
+
         // 2. Suppression dans la base de données
         await db.execute('DELETE FROM produits WHERE id_produit = ?', [productId]);
 
@@ -161,6 +164,16 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
     } catch (error) {
         console.error("Erreur suppression produit:", error);
         res.status(500).json({ message: "Erreur serveur lors de la suppression." });
+
+        // ERREUR DE CLÉ ÉTRANGÈRE (Produit lié à une commande existante)
+        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+            return res.status(400).json({ 
+                message: "Ce produit ne peut pas être supprimé car il figure dans l'historique des commandes d'un client. Nous vous conseillons de le rendre 'Indisponible' plutôt que de le supprimer." 
+            });
+        }
+
+        res.status(500).json({ message: "Erreur serveur. Vérifiez la console." });
+    
     }
 });
 
@@ -206,6 +219,17 @@ app.put('/api/products/:id', authenticateToken, upload.single('productImage'), a
     } catch (error) {
         console.error("Erreur mise à jour produit:", error);
         res.status(500).json({ message: "Erreur serveur lors de la modification." });
+    }
+});
+// PATCH : Changer le statut (Activer/Archiver) - INDISPENSABLE POUR admin.html
+app.patch('/api/products/:id/status', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { actif } = req.body; // Reçoit 0 ou 1
+    try {
+        await db.execute('UPDATE produits SET actif = ? WHERE id_produit = ?', [actif, id]);
+        res.json({ message: actif === 1 ? 'Produit activé' : 'Produit archivé' });
+    } catch (error) {
+        res.status(500).json({ message: "Erreur lors du changement de statut." });
     }
 });
 // ----------------------------------------------------
