@@ -10,7 +10,7 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = 'votre_cle_secrete_tres_longue_et_securisee'; 
+const JWT_SECRET = process.env.JWT_SECRET; 
 
 // --- CONFIGURATION DU DOSSIER UPLOADS (Logique Render/Production) ---
 // Utilisation de path.resolve pour garantir que le dossier est à la racine du projet
