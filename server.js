@@ -151,9 +151,6 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: "Produit non trouvé." });
         }
 
-        // 2. Nettoyage préventif du panier (produit pas encore commandé mais mis de côté par un client)
-        await db.execute('DELETE FROM panier WHERE id_produit = ?', [productId]);
-
         // 2. Suppression dans la base de données
         await db.execute('DELETE FROM produits WHERE id_produit = ?', [productId]);
 
