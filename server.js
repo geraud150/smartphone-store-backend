@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
@@ -7,28 +8,17 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const fs = require('fs');
-
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET; 
-
-// --- CONFIGURATION DU DOSSIER UPLOADS (Logique Render/Production) ---
-// Utilisation de path.resolve pour garantir que le dossier est à la racine du projet
-const uploadDir = path.resolve(process.cwd(), 'uploads');
-
-// Création du dossier au démarrage s'il n'existe pas
-if (!fs.existsSync(uploadDir)) {
-    console.log("📁 Création du dossier uploads...");
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
 
 // --- MIDDLEWARES ---
 app.use(cors()); // Utilisation du module cors standard (plus propre)
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Rendre le dossier uploads accessible publiquement
-app.use('/uploads', express.static(uploadDir));
 
 // --- MIDDLEWARE D'AUTHENTIFICATION ---
 const authenticateToken = (req, res, next) => {
@@ -48,27 +38,24 @@ const authenticateToken = (req, res, next) => {
         next();
     });
 };
+// --- CONFIGURATION CLOUDINARY ---
 
-// --- CONFIGURATION MULTER ---
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // On vérifie l'existence avant chaque upload
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Configuration du nouveau moteur de stockage
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'smartphone_images', // Nom du dossier qui sera créé sur Cloudinary
+    allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
   },
 });
 
-const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // Limite à 5 Mo
-});
-
+const upload = multer({ storage: storage });
 // ----------------------------------------------------
 // ROUTES UTILISATEURS (INSCRIPTION / CONNEXION)
 // ----------------------------------------------------
@@ -127,7 +114,7 @@ app.post('/api/products', authenticateToken, upload.single('productImage'), asyn
       return res.status(400).json({ message: 'Nom, prix et image obligatoires.' });
     }
 
-    const imageUrl = `/uploads/${req.file.filename}`;
+    const imageUrl = req.file.path;
     const sql = `INSERT INTO produits (nom, prix, url_image, description, ram, stockage, batterie, appareil_photo, ecran, categorie) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     
     await db.execute(sql, [nom, prix, imageUrl, description || null, ram || null, stockage || null, batterie || null, appareil_photo || null, ecran || null, categorie || null]);
