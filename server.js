@@ -128,6 +128,18 @@ app.post('/api/products', authenticateToken, upload.single('productImage'), asyn
 // ----------------------------------------------------
 // ENDPOINT ADMIN : SUPPRIMER UN PRODUIT
 // ----------------------------------------------------
+// --- ROUTE GESTION (Admin) ---
+// Ici, on récupère TOUT (actif = 1 ET actif = 0) pour pouvoir gérer l'inventaire
+app.get('/api/admin/products', async (req, res) => {
+  try {
+    // Note : On retire le "WHERE actif = 1"
+    const [rows] = await db.execute('SELECT * FROM produits ORDER BY id_produit DESC');
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: "Erreur lors du chargement complet des produits." });
+  }
+});
+
 app.delete('/api/products/:id', authenticateToken, async (req, res) => {
     const productId = req.params.id;
 
