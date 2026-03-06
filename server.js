@@ -163,12 +163,12 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
 
         // ERREUR DE CLÉ ÉTRANGÈRE (Produit lié à une commande existante)
         if (error.code === 'ER_ROW_IS_REFERENCED_2') {
-            return res.status(400).json({ 
-                message: "Ce produit ne peut pas être supprimé car il figure dans l'historique des commandes d'un client. Nous vous conseillons de le rendre 'Indisponible' plutôt que de le supprimer." 
+             return res.status(400).json({ 
+                error: "Impossible de supprimer : ce produit est présent dans des commandes." 
             });
         }
 
-        res.status(500).json({ message: "Erreur serveur. Vérifiez la console." });
+        return res.status(500).json({ message: "Une erreur interne est survenue lors de la suppression." });
     
     }
 });
@@ -285,6 +285,71 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
         res.json(orders);
     } catch (error) {
         res.status(500).json({ message: "Erreur récupération commandes." });
+    }
+});
+
+// 1. Route pour récupérer tous les produits (nécessaire pour l'affichage du tableau)
+app.get('/api/products/:id/stock-info', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [rows] = await db.execute(
+            'SELECT id_produit, nom, stock_actuel, seuil_alerte FROM produits WHERE id_produit = ?',
+            [id]
+        );
+        
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "Produit non trouvé." });
+        }
+        
+        res.json(rows[0]);
+    } catch (error) {
+        console.error("Erreur récupération produit spécifique:", error);
+        res.status(500).json({ error: "Erreur lors de la récupération du produit." });
+    }
+});
+// Route pour ajouter du stock manuellement (Réapprovisionnement)
+app.post('/api/products/:id/add-stock', authenticateToken, async (req, res) => {
+    const productId = req.params.id;
+    const { quantite, id_utilisateur, motif } = req.body;
+
+    if (!quantite || quantite <= 0) {
+        return res.status(400).json({ error: "La quantité doit être supérieure à 0." });
+    }
+
+    const connection = await db.getConnection(); // Utilisation d'une transaction pour la sécurité
+    try {
+        await connection.beginTransaction();
+
+        // 1. Enregistrer le mouvement dans l'historique (ENTREE)
+        await connection.execute(
+            `INSERT INTO mouvements_stock (id_produit, id_utilisateur, type_mouvement, quantite, date_mouvement) 
+             VALUES (?, ?, 'ENTREE', ?, NOW())`,
+            [productId, id_utilisateur || null, quantite]
+        );
+
+        // 2. Mettre à jour le stock_actuel dans la table produits
+        await connection.execute(
+            `UPDATE produits SET stock_actuel = stock_actuel + ? WHERE id_produit = ?`,
+            [quantite, productId]
+        );
+// Récupérer le nouveau stock pour le renvoyer au front
+const [updatedProduct] = await connection.execute(
+    'SELECT stock_actuel FROM produits WHERE id_produit = ?',
+    [productId]
+);
+
+await connection.commit();
+res.json({ 
+    message: "Stock mis à jour avec succès !", 
+    nouveauStock: updatedProduct[0].stock_actuel 
+});
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Erreur lors du réapprovisionnement:", error);
+        res.status(500).json({ error: "Erreur lors de la mise à jour du stock." });
+    } finally {
+        connection.release();
     }
 });
 
