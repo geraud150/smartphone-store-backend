@@ -22,7 +22,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- MIDDLEWARE D'AUTHENTIFICATION ---
 const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers.authorization;
+    const authHeader = req.headers['authorization'];
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ message: 'Accès refusé. Veuillez vous connecter.' });
@@ -37,6 +37,16 @@ const authenticateToken = (req, res, next) => {
         req.user = user; 
         next();
     });
+};
+// --- MIDDLEWARE D'ADMINISTRATEUR ---
+const isAdmin = (req, res, next) => {
+    if (req.user && req.user.role === 'admin') {
+        next(); // L'utilisateur est admin, on continue
+    } else {
+        return res.status(403).json({ 
+            message: "Accès refusé : Droits administrateur requis." 
+        });
+    }
 };
 // --- CONFIGURATION CLOUDINARY ---
 
@@ -87,9 +97,10 @@ app.post('/api/login', async (req, res) => {
         if (!user || !(await bcrypt.compare(password, user.mot_de_passe_hache))) {
             return res.status(401).json({ message: 'Email ou mot de passe incorrect.' });
         }
-        const token = jwt.sign({ id: user.id_utilisateur, name: user.nom_complet }, JWT_SECRET, { expiresIn: '10h' });
-        res.json({ token, user: { id: user.id_utilisateur, name: user.nom_complet } });
+        const token = jwt.sign({ id: user.id_utilisateur, name: user.nom_complet, role: user.role }, JWT_SECRET, { expiresIn: '10h' });
+        res.json({ token, user: { id: user.id_utilisateur, name: user.nom_complet, role: user.role } });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ message: "Erreur de connexion." });
     }
 });
@@ -107,7 +118,7 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.post('/api/products', authenticateToken, upload.single('productImage'), async (req, res) => {
+app.post('/api/products', authenticateToken, isAdmin, upload.single('productImage'), async (req, res) => {
   try {
     const { nom, prix, description, ram, stockage, batterie, appareil_photo, ecran, categorie } = req.body;
     if (!nom || !prix || !req.file) {
@@ -130,7 +141,7 @@ app.post('/api/products', authenticateToken, upload.single('productImage'), asyn
 // ----------------------------------------------------
 // --- ROUTE GESTION (Admin) ---
 // Ici, on récupère TOUT (actif = 1 ET actif = 0) pour pouvoir gérer l'inventaire
-app.get('/api/admin/products', async (req, res) => {
+app.get('/api/admin/products', authenticateToken, isAdmin, async (req, res) => {
   try {
     // Note : On retire le "WHERE actif = 1"
     const [rows] = await db.execute('SELECT * FROM produits ORDER BY id_produit DESC');
@@ -140,7 +151,7 @@ app.get('/api/admin/products', async (req, res) => {
   }
 });
 
-app.delete('/api/products/:id', authenticateToken, async (req, res) => {
+app.delete('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
     const productId = req.params.id;
 
     try {
@@ -176,7 +187,7 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
 // ----------------------------------------------------
 // ENDPOINT ADMIN : MODIFIER UN PRODUIT
 // ----------------------------------------------------
-app.put('/api/products/:id', authenticateToken, upload.single('productImage'), async (req, res) => {
+app.put('/api/products/:id', authenticateToken, isAdmin, upload.single('productImage'), async (req, res) => {
     const productId = req.params.id;
     const { nom, prix, description, ram, stockage, batterie, appareil_photo, ecran, categorie } = req.body;
     
@@ -186,7 +197,7 @@ app.put('/api/products/:id', authenticateToken, upload.single('productImage'), a
 
         // Si une nouvelle image a été téléchargée
         if (req.file) {
-            const imageUrl = `/uploads/${req.file.filename}`;
+            const imageUrl = req.file.path;
             sql = `
                 UPDATE produits 
                 SET nom=?, prix=?, url_image=?, description=?, ram=?, stockage=?, batterie=?, appareil_photo=?, ecran=?, categorie=? 
@@ -218,7 +229,7 @@ app.put('/api/products/:id', authenticateToken, upload.single('productImage'), a
     }
 });
 // PATCH : Changer le statut (Activer/Archiver) - INDISPENSABLE POUR admin.html
-app.patch('/api/products/:id/status', authenticateToken, async (req, res) => {
+app.patch('/api/products/:id/status', authenticateToken, isAdmin, async (req, res) => {
     const { id } = req.params;
     const { actif } = req.body; // Reçoit 0 ou 1
     try {
@@ -289,7 +300,7 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
 });
 
 // 1. Route pour récupérer tous les produits (nécessaire pour l'affichage du tableau)
-app.get('/api/products/:id/stock-info', async (req, res) => {
+app.get('/api/products/:id/stock-info', authenticateToken, isAdmin, async (req, res) => {
     const { id } = req.params;
     try {
         const [rows] = await db.execute(
@@ -308,9 +319,10 @@ app.get('/api/products/:id/stock-info', async (req, res) => {
     }
 });
 // Route pour ajouter du stock manuellement (Réapprovisionnement)
-app.post('/api/products/:id/add-stock', authenticateToken, async (req, res) => {
+app.post('/api/products/:id/add-stock', authenticateToken, isAdmin, async (req, res) => {
     const productId = req.params.id;
-    const { quantite, id_utilisateur, motif } = req.body;
+    const { quantite } = req.body;
+    const adminId = req.user.id;
 
     if (!quantite || quantite <= 0) {
         return res.status(400).json({ error: "La quantité doit être supérieure à 0." });
@@ -324,7 +336,7 @@ app.post('/api/products/:id/add-stock', authenticateToken, async (req, res) => {
         await connection.execute(
             `INSERT INTO mouvements_stock (id_produit, id_utilisateur, type_mouvement, quantite, date_mouvement) 
              VALUES (?, ?, 'ENTREE', ?, NOW())`,
-            [productId, id_utilisateur || null, quantite]
+            [productId, adminId , quantite]
         );
 
         // 2. Mettre à jour le stock_actuel dans la table produits
