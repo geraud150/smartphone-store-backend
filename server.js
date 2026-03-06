@@ -92,7 +92,7 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     try {
-        const [rows] = await db.execute('SELECT id_utilisateur, nom_complet, mot_de_passe_hache FROM utilisateurs WHERE email = ?', [email]);
+        const [rows] = await db.execute('SELECT id_utilisateur, nom_complet, mot_de_passe_hache, role FROM utilisateurs WHERE email = ?', [email]);
         const user = rows[0];
         if (!user || !(await bcrypt.compare(password, user.mot_de_passe_hache))) {
             return res.status(401).json({ message: 'Email ou mot de passe incorrect.' });
