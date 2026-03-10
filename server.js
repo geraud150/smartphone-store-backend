@@ -13,6 +13,25 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET; 
+ 
+// Cache la colonne prix des details pour compatibilite schema
+let detailsPriceColumnCache = null;
+async function resolveDetailsPriceColumn(executor) {
+  if (detailsPriceColumnCache) return detailsPriceColumnCache;
+
+  const [cols] = await executor.execute('SHOW COLUMNS FROM details_commandes');
+  const fields = cols.map(c => c.Field);
+
+  if (fields.includes('prix_a_la_commande')) {
+    detailsPriceColumnCache = 'prix_a_la_commande';
+  } else if (fields.includes('prix_unitaire')) {
+    detailsPriceColumnCache = 'prix_unitaire';
+  } else {
+    detailsPriceColumnCache = null;
+  }
+
+  return detailsPriceColumnCache;
+}
 
 // --- MIDDLEWARES ---
 app.use(cors()); // Utilisation du module cors standard (plus propre)
@@ -245,43 +264,118 @@ app.patch('/api/products/:id/status', authenticateToken, isAdmin, async (req, re
 
 app.post('/api/orders', authenticateToken, async (req, res) => {
     const userId = req.user.id;
-    const { items } = req.body;
-    if (!items || items.length === 0) return res.status(400).json({ message: "Panier vide." });
+    
+    // Extraction des données du corps de la requête
+    const { 
+        items, 
+        prenom, 
+        nom, 
+        email, 
+        adresse_livraison, 
+        ville, 
+        code_postal, 
+        mode_paiement 
+    } = req.body;
+
+    if (!items || items.length === 0) {
+        return res.status(400).json({ message: "Le panier est vide." });
+    }
 
     let connection;
+
     try {
-        connection = await db.getConnection();
+        connection = await db.getConnection(); 
         await connection.beginTransaction();
 
-        let total = items.reduce((sum, item) => sum + (Number(item.quantity) * Number(item.price_at_order)), 0);
-        const dateCommande = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        // 1. Calcul du montant total sécurisé (quantité * prix à la commande)
+        const montantTotalCalculé = items.reduce((acc, item) => {
+            return acc + (parseFloat(item.price_at_order) * parseInt(item.quantity));
+        }, 0);
 
-        const [orderResult] = await connection.execute(
-            'INSERT INTO commandes (id_utilisateur, date_commande, statut, montant_total) VALUES (?, ?, ?, ?)',
-            [userId, dateCommande, 'En attente', total]
-        );
+        // 2. Insertion de la commande avec montant_total et les deux statuts
+        const sqlCommande = `
+            INSERT INTO commandes (
+                id_utilisateur, prenom, nom, email, 
+                adresse_livraison, ville, code_postal, 
+                montant_total, statut, statut_paiement, 
+                mode_paiement, date_commande
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        `;
+
+        // Paramètres : statut par défaut 'En attente', statut_paiement 'Payé'
+        const [orderResult] = await connection.execute(sqlCommande, [
+            userId, 
+            prenom, 
+            nom, 
+            email, 
+            adresse_livraison, 
+            ville, 
+            code_postal, 
+            montantTotalCalculé, 
+            'En attente', // Colonne 'statut'
+            'Payé',       // Colonne 'statut_paiement'
+            mode_paiement
+        ]);
+        
         const idCommande = orderResult.insertId;
 
-        const detailQueries = items.map(item => connection.execute(
-            'INSERT INTO details_commandes (id_commande, id_produit, quantite, prix_a_la_commande) VALUES (?, ?, ?, ?)',
-            [idCommande, item.product_id, item.quantity, item.price_at_order]
-        ));
-        await Promise.all(detailQueries);
-        await connection.commit();
+        const priceColumn = await resolveDetailsPriceColumn(connection);
+        if (!priceColumn) {
+            throw new Error('Colonne prix introuvable dans details_commandes.');
+        }
 
-        res.status(201).json({ message: "Commande validée.", orderId: idCommande });
+        // 3. Boucle sur les articles pour les détails et la mise à jour des stocks
+        for (const item of items) {
+            // A. Ajout dans details_commandes
+            await connection.execute(
+                `INSERT INTO details_commandes (id_commande, id_produit, quantite, ${priceColumn}) VALUES (?, ?, ?, ?)`,
+
+                [idCommande, item.product_id, item.quantity, item.price_at_order]
+            );
+
+            // B. Vérification et mise à jour du stock
+            const [rows] = await connection.execute('SELECT stock_actuel FROM produits WHERE id_produit = ?', [item.product_id]);
+            
+            if (rows.length === 0) {
+                throw new Error(`Produit introuvable (ID: ${item.product_id})`);
+            }
+
+            if (rows[0].stock_actuel < item.quantity) {
+                throw new Error(`Stock insuffisant pour le produit ID ${item.product_id}`);
+            }
+
+            await connection.execute(
+                'UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id_produit = ?',
+                [item.quantity, item.product_id]
+            );
+        }
+
+        // Si tout est ok, on valide la transaction
+        await connection.commit(); 
+
+        console.log(`✅ Commande #${idCommande} réussie (Total: ${montantTotalCalculé}€)`);
+        res.status(201).json({ 
+            message: "Commande enregistrée avec succès !", 
+            orderId: idCommande 
+        });
+
     } catch (error) {
+        // En cas d'erreur, on annule toutes les opérations MySQL précédentes
         if (connection) await connection.rollback();
-        res.status(500).json({ message: "Erreur lors de la commande." });
+        
+        console.error("❌ Erreur lors du passage de commande:", error.message);
+        res.status(500).json({ 
+            message: "Échec de la commande.", 
+            error: error.message 
+        });
     } finally {
         if (connection) connection.release();
     }
 });
-
 app.get('/api/orders', authenticateToken, async (req, res) => {
     try {
         const [orders] = await db.execute(`
-            SELECT c.id_commande, c.date_commande, c.statut, c.montant_total
+            SELECT c.id_commande, c.date_commande, c.statut, c.montant_total, c.prenom, c.nom, c.adresse_livraison, c.ville, c.code_postal, c.statut_paiement, c.mode_paiement
             FROM commandes c WHERE c.id_utilisateur = ? ORDER BY c.date_commande DESC
         `, [req.user.id]);
 
