@@ -313,7 +313,7 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
             code_postal, 
             montantTotalCalculé, 
             'En attente', // Colonne 'statut'
-            'Payé',       // Colonne 'statut_paiement'
+            'payé',       // Colonne 'statut_paiement'
             mode_paiement
         ]);
         
