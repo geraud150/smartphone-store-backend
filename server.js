@@ -360,15 +360,23 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
         });
 
     } catch (error) {
-        // En cas d'erreur, on annule toutes les opérations MySQL précédentes
-        if (connection) await connection.rollback();
-        
-        console.error("❌ Erreur lors du passage de commande:", error.message);
-        res.status(500).json({ 
-            message: "Échec de la commande.", 
-            error: error.message 
+    if (connection) await connection.rollback();
+
+    console.error("❌ Erreur lors du passage de commande:", error.message);
+
+    if (error.message && error.message.includes("Stock insuffisant")) {
+        return res.status(409).json({
+            message: "Stock insuffisant pour certains produits.",
+            error: error.message
         });
-    } finally {
+    }
+
+    res.status(500).json({
+        message: "Échec de la commande.",
+        error: error.message
+    });
+} finally {
+
         if (connection) connection.release();
     }
 });
