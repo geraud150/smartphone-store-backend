@@ -137,6 +137,20 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
+app.get('/api/products/:id', async (req, res) => {
+    const productId = req.params.id;
+    try {
+        const [rows] = await db.execute('SELECT * FROM produits WHERE id_produit = ?', [productId]);
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "Produit non trouvé" });
+        }
+        res.json(rows[0]);
+    } catch (error) {
+        console.error("Erreur récupération produit:", error);
+        res.status(500).json({ message: "Erreur serveur" });
+    }
+});
+
 app.post('/api/products', authenticateToken, isAdmin, upload.single('productImage'), async (req, res) => {
   try {
     const { nom, prix, description, ram, stockage, batterie, appareil_photo, ecran, categorie } = req.body;
