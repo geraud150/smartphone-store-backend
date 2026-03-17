@@ -6,6 +6,7 @@ const db = require('./db');
 const multer = require('multer');
 const path = require('path');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const cors = require('cors');
 const fs = require('fs');
 const cloudinary = require('cloudinary').v2;
@@ -13,6 +14,7 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET; 
+const cartStore = new Map(); // panier en mémoire
  
 // Cache la colonne prix des details pour compatibilite schema
 let detailsPriceColumnCache = null;
@@ -57,6 +59,34 @@ const authenticateToken = (req, res, next) => {
         next();
     });
 };
+// --- AUTH OPTIONNEL (invités autorisés) ---
+const optionalAuth = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        req.user = null;
+        return next();
+    }
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+        req.user = null;
+        return next();
+    }
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            req.user = null;
+            return next();
+        }
+        req.user = user;
+        next();
+    });
+};
+function getCartKey(req) {
+  if (req.user && req.user.id) return `user:${req.user.id}`;
+  const guestToken = req.headers['x-guest-token'] || req.body?.guest_token || req.query?.guest_token;
+  if (!guestToken) return null;
+  return `guest:${guestToken}`;g
+}
+
 // --- MIDDLEWARE D'ADMINISTRATEUR ---
 const isAdmin = (req, res, next) => {
     if (req.user && req.user.role === 'admin') {
@@ -125,6 +155,27 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ----------------------------------------------------
+// CHECK EMAIL + SESSION INVITÉ
+// ----------------------------------------------------
+app.post('/api/auth/check-email', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email requis.' });
+    try {
+        const [rows] = await db.execute('SELECT id_utilisateur FROM utilisateurs WHERE email = ?', [email]);
+        res.json({ exists: rows.length > 0 });
+    } catch (error) {
+        res.status(500).json({ message: 'Erreur de vérification email.' });
+    }
+});
+
+app.post('/api/auth/guest-session', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email requis.' });
+    const guest_token = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    res.json({ guest_token, email });
+});
+
+// ----------------------------------------------------
 // ROUTES PRODUITS
 // ----------------------------------------------------
 
@@ -168,6 +219,30 @@ app.post('/api/products', authenticateToken, isAdmin, upload.single('productImag
     res.status(500).json({ message: "Échec de l'ajout du produit." });
   }
 });
+//
+// ----------------------------------------------------
+// ROUTES PANIER (en mémoire, lié à l'utilisateur ou à une session invitée)
+// ----------------------------------------------------
+app.post('/api/cart/set', optionalAuth, async (req, res) => {
+  const { items, guest_token } = req.body;
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: 'Panier vide.' });
+  }
+  const key = getCartKey(req) || (guest_token ? `guest:${guest_token}` : null);
+  if (!key) return res.status(400).json({ message: 'Token invité requis.' });
+
+  cartStore.set(key, { items, updated_at: Date.now() });
+  res.json({ ok: true });
+});
+
+app.get('/api/cart', optionalAuth, async (req, res) => {
+  const key = getCartKey(req);
+  if (!key) return res.status(400).json({ message: 'Token invité requis.' });
+
+  const cart = cartStore.get(key);
+  res.json({ items: cart?.items || [] });
+});
+
 
 // ----------------------------------------------------
 // ENDPOINT ADMIN : SUPPRIMER UN PRODUIT
@@ -276,23 +351,35 @@ app.patch('/api/products/:id/status', authenticateToken, isAdmin, async (req, re
 // ROUTES COMMANDES
 // ----------------------------------------------------
 
-app.post('/api/orders', authenticateToken, async (req, res) => {
-    const userId = req.user.id;
+app.post('/api/orders', optionalAuth, async (req, res) => {
+    const userId = req.user ? req.user.id : null;
     
     // Extraction des données du corps de la requête
     const { 
         items, 
         prenom, 
         nom, 
-        email, 
+        email,
+        telephone,
         adresse_livraison, 
         ville, 
         code_postal, 
-        mode_paiement 
+        mode_paiement,
+        guest_token
     } = req.body;
 
-    if (!items || items.length === 0) {
-        return res.status(400).json({ message: "Le panier est vide." });
+    const cartKey = getCartKey(req) || (guest_token ? `guest:${guest_token}` : null);
+    const storedCart = cartKey ? cartStore.get(cartKey) : null;
+    const itemsToUse = storedCart?.items || items;
+
+    if (!itemsToUse || itemsToUse.length === 0) {
+      return res.status(400).json({ message: "Le panier est vide." });
+  }
+
+    if (!userId) {
+        if (!email || !telephone) {
+            return res.status(400).json({ message: "Email et téléphone requis pour une commande invitée." });
+        }
     }
 
     let connection;
@@ -302,30 +389,32 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Calcul du montant total sécurisé (quantité * prix à la commande)
-        const montantTotalCalculé = items.reduce((acc, item) => {
+        const montantTotalCalculé = itemsToUse.reduce((acc, item) => {
             return acc + (parseFloat(item.price_at_order) * parseInt(item.quantity));
         }, 0);
 
         // 2. Insertion de la commande avec montant_total et les deux statuts
         const sqlCommande = `
             INSERT INTO commandes (
-                id_utilisateur, prenom, nom, email, 
+                id_utilisateur, is_guest, prenom, nom, email, telephone,
                 adresse_livraison, ville, code_postal, 
                 montant_total, statut, statut_paiement, 
                 mode_paiement, date_commande
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `;
 
         // Paramètres : statut par défaut 'En attente', statut_paiement 'Payé'
         const [orderResult] = await connection.execute(sqlCommande, [
-            userId, 
-            prenom, 
-            nom, 
-            email, 
-            adresse_livraison, 
-            ville, 
-            code_postal, 
-            montantTotalCalculé, 
+            userId,
+            userId ? 0 : 1,
+            prenom,
+            nom,
+            email,
+            telephone || null,
+            adresse_livraison,
+            ville,
+            code_postal,
+            montantTotalCalculé,
             'En attente', // Colonne 'statut'
             'payé',       // Colonne 'statut_paiement'
             mode_paiement
@@ -339,7 +428,7 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
         }
 
         // 3. Boucle sur les articles pour les détails et la mise à jour des stocks
-        for (const item of items) {
+        for (const item of itemsToUse) {
             // A. Ajout dans details_commandes
             await connection.execute(
                 `INSERT INTO details_commandes (id_commande, id_produit, quantite, ${priceColumn}) VALUES (?, ?, ?, ?)`,
@@ -507,7 +596,7 @@ app.delete('/api/user/delete', authenticateToken, async (req, res) => {
 // Démarrage du Serveur
 // ----------------------------------------------------
 app.listen(PORT, () => {
-    console.log(`✅ Serveur API démarré sur http://localhost:${PORT}/`);
+    console.log(`✅ Serveur API démarré sur https://localhost:${PORT}/`);
     console.log(`   Endpoints disponibles:`);
     console.log(`   - POST /api/register`);
     console.log(`   - POST /api/login`);
