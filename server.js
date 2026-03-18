@@ -84,7 +84,7 @@ function getCartKey(req) {
   if (req.user && req.user.id) return `user:${req.user.id}`;
   const guestToken = req.headers['x-guest-token'] || req.body?.guest_token || req.query?.guest_token;
   if (!guestToken) return null;
-  return `guest:${guestToken}`;g
+  return `guest:${guestToken}`;
 }
 
 // --- MIDDLEWARE D'ADMINISTRATEUR ---
@@ -568,6 +568,116 @@ res.json({
     } finally {
         connection.release();
     }
+});
+
+app.get('/api/orders/:id/guest-status', async (req, res) => {
+  const { id } = req.params;
+  const email = (req.query.email || '').trim().toLowerCase();
+
+  if (!email) {
+    return res.status(400).json({ message: 'Email requis.' });
+  }
+
+  try {
+    const [rows] = await db.execute(
+      'SELECT is_guest, email FROM commandes WHERE id_commande = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Commande introuvable.' });
+    }
+
+    const orderEmail = (rows[0].email || '').trim().toLowerCase();
+    if (!orderEmail || orderEmail !== email) {
+      return res.status(403).json({ message: 'Accès refusé.' });
+    }
+
+    res.json({ is_guest: rows[0].is_guest });
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur.' });
+  }
+});
+
+app.post('/api/convert-guest', async (req, res) => {
+  const { orderId, password } = req.body;
+  if (typeof password !== 'string' || password.trim().length < 6) {
+  return res.status(400).json({ message: "Mot de passe trop court (min 6 caractères)." });
+}
+
+
+  if (!orderId || !password) {
+    return res.status(400).json({ message: "orderId et mot de passe requis." });
+  }
+
+  try {
+    // 1) Récupérer la commande (et ses infos)
+    const [orders] = await db.execute(
+      'SELECT id_commande, prenom, nom, email, telephone, is_guest FROM commandes WHERE id_commande = ?',
+      [orderId]
+    );
+
+    const order = orders[0];
+    if (!order) return res.status(404).json({ message: "Commande introuvable." });
+    if (order.is_guest === 0) return res.status(400).json({ message: "Déjà lié à un compte." });
+
+    // 2) Si email existe déjà → lier la commande
+    
+    const [existing] = await db.execute(
+  'SELECT id_utilisateur, nom_complet FROM utilisateurs WHERE email = ?',
+  [order.email]
+);
+
+if (existing.length > 0) {
+  await db.execute(
+    'UPDATE commandes SET id_utilisateur = ?, is_guest = 0 WHERE id_commande = ?',
+    [existing[0].id_utilisateur, orderId]
+  );
+
+  const token = jwt.sign(
+    { id: existing[0].id_utilisateur, name: existing[0].nom_complet || order.email },
+    JWT_SECRET,
+    { expiresIn: '10h' }
+  );
+
+  return res.json({
+    message: "Compte existant relié à la commande.",
+    token,
+    user: { id: existing[0].id_utilisateur, name: existing[0].nom_complet || order.email }
+  });
+}
+    // 3) Créer un nouvel utilisateur
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const fullName = `${order.prenom || ''} ${order.nom || ''}`.trim();
+
+    const [insertUser] = await db.execute(
+      'INSERT INTO utilisateurs (nom_complet, email, mot_de_passe_hache) VALUES (?, ?, ?)',
+      [fullName || null, order.email, hashedPassword]
+    );
+
+    // 4) Lier la commande au nouvel utilisateur
+    await db.execute(
+      'UPDATE commandes SET id_utilisateur = ?, is_guest = 0 WHERE id_commande = ?',
+      [insertUser.insertId, orderId]
+    );
+
+    // 5) Auto-login: renvoyer token
+    const token = jwt.sign(
+     { id: insertUser.insertId, name: fullName || order.email },
+    JWT_SECRET,
+     { expiresIn: '10h' }
+  );
+
+    return res.json({
+         message: "Compte créé et commande liée.",
+         token,
+         user: { id: insertUser.insertId, name: fullName || order.email }
+});
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Erreur serveur." });
+  }
 });
 
 // ----------------------------------------------------
