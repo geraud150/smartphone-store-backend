@@ -36,7 +36,11 @@ async function resolveDetailsPriceColumn(executor) {
 }
 
 // --- MIDDLEWARES ---
-app.use(cors()); // Utilisation du module cors standard (plus propre)
+app.use(cors({ // Permet les requêtes depuis n'importe quelle origine (à restreindre en production)
+  origin: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Guest-Token']
+}));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -396,17 +400,18 @@ app.post('/api/orders', optionalAuth, async (req, res) => {
         // 2. Insertion de la commande avec montant_total et les deux statuts
         const sqlCommande = `
             INSERT INTO commandes (
-                id_utilisateur, is_guest, prenom, nom, email, telephone,
+                id_utilisateur, is_guest, guest_token, prenom, nom, email, telephone,
                 adresse_livraison, ville, code_postal, 
                 montant_total, statut, statut_paiement, 
                 mode_paiement, date_commande
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `;
 
         // Paramètres : statut par défaut 'En attente', statut_paiement 'Payé'
         const [orderResult] = await connection.execute(sqlCommande, [
             userId,
             userId ? 0 : 1,
+            userId ? null : guest_token || null,
             prenom,
             nom,
             email,
@@ -570,37 +575,57 @@ res.json({
     }
 });
 
-app.get('/api/orders/:id/guest-status', async (req, res) => {
-  const { id } = req.params;
-  const email = (req.query.email || '').trim().toLowerCase();
+app.get('/api/orders/:id', optionalAuth, async (req, res) => {
+  const orderId = Number(req.params.id);
 
-  if (!email) {
-    return res.status(400).json({ message: 'Email requis.' });
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    return res.status(400).json({ message: "ID commande invalide" });
   }
 
   try {
     const [rows] = await db.execute(
-      'SELECT is_guest, email FROM commandes WHERE id_commande = ?',
-      [id]
+      `SELECT
+         id_commande, id_utilisateur, is_guest, guest_token, email,
+         prenom, nom, telephone, adresse_livraison, ville, code_postal,
+         montant_total, statut, statut_paiement, mode_paiement, date_commande
+       FROM commandes
+       WHERE id_commande = ?`,
+      [orderId]
     );
 
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'Commande introuvable.' });
+    const order = rows[0];
+
+    if (!order) {
+      return res.status(404).json({ message: "Commande introuvable" });
     }
 
-    const orderEmail = (rows[0].email || '').trim().toLowerCase();
-    if (!orderEmail || orderEmail !== email) {
-      return res.status(403).json({ message: 'Accès refusé.' });
-    }
+    // Vérification sécurité
+    const guestToken = String(req.headers['x-guest-token'] || '').trim();
 
-    res.json({ is_guest: rows[0].is_guest });
+if (req.user) {
+  if (Number(order.id_utilisateur) !== Number(req.user.id)) {
+    return res.status(403).json({ message: "Accès refusé" });
+  }
+} else {
+  if (Number(order.is_guest) !== 1) {
+    return res.status(403).json({ message: "Accès refusé" });
+  }
+  if (!guestToken || !order.guest_token || guestToken !== order.guest_token) {
+    return res.status(403).json({ message: "Accès refusé" });
+  }
+}
+
+    return res.json(order);
   } catch (err) {
-    res.status(500).json({ message: 'Erreur serveur.' });
+    console.error("Erreur GET /api/orders/:id:", err);
+    return res.status(500).json({ message: "Erreur serveur" });
   }
 });
 
 app.post('/api/convert-guest', async (req, res) => {
   const { orderId, password } = req.body;
+  const guestToken = String(req.headers['x-guest-token'] || '').trim();
+
   if (typeof password !== 'string' || password.trim().length < 6) {
   return res.status(400).json({ message: "Mot de passe trop court (min 6 caractères)." });
 }
@@ -613,13 +638,17 @@ app.post('/api/convert-guest', async (req, res) => {
   try {
     // 1) Récupérer la commande (et ses infos)
     const [orders] = await db.execute(
-      'SELECT id_commande, prenom, nom, email, telephone, is_guest FROM commandes WHERE id_commande = ?',
+      'SELECT id_commande, prenom, nom, email, telephone, is_guest, guest_token FROM commandes WHERE id_commande = ?',
       [orderId]
     );
 
     const order = orders[0];
     if (!order) return res.status(404).json({ message: "Commande introuvable." });
     if (order.is_guest === 0) return res.status(400).json({ message: "Déjà lié à un compte." });
+    if (!guestToken || !order.guest_token || guestToken !== order.guest_token) {
+      return res.status(403).json({ message: "Accès refusé." });
+    }
+
 
     // 2) Si email existe déjà → lier la commande
     
@@ -630,7 +659,7 @@ app.post('/api/convert-guest', async (req, res) => {
 
 if (existing.length > 0) {
   await db.execute(
-    'UPDATE commandes SET id_utilisateur = ?, is_guest = 0 WHERE id_commande = ?',
+    'UPDATE commandes SET id_utilisateur = ?, is_guest = 0, guest_token = NULL WHERE id_commande = ?',
     [existing[0].id_utilisateur, orderId]
   );
 
@@ -657,7 +686,7 @@ if (existing.length > 0) {
 
     // 4) Lier la commande au nouvel utilisateur
     await db.execute(
-      'UPDATE commandes SET id_utilisateur = ?, is_guest = 0 WHERE id_commande = ?',
+      'UPDATE commandes SET id_utilisateur = ?, is_guest = 0, guest_token = NULL WHERE id_commande = ?',
       [insertUser.insertId, orderId]
     );
 
